@@ -8,11 +8,9 @@ import glob
 DATA_DIR = "bot_ready_data"
 OUTPUT_DIR = "reality_check_results"
 INITIAL_CAP = 100000.0
-
-# FRICTION CONSTANTS
-SLIPPAGE_BPS = 0.0010      # 0.1% per trade (Spread + Execution)
-ESTIMATED_TAX_RATE = 0.20  # 20% of profits set aside (stops compounding)
-MIN_TRADE_SIZE = 500       # Minimum $ amount to bother trading
+SLIPPAGE_BPS = 0.0010     
+ESTIMATED_TAX_RATE = 0.20  
+MIN_TRADE_SIZE = 500       
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -45,18 +43,15 @@ class RealityEngine:
             trend = df['trend_baseline'].iloc[i]
             breakout = df['breakout_threshold'].iloc[i]
 
-            # 1. REALISTIC EXIT
             if share_count > 0:
                 trailing_stop = peak_price - (3.5 * atr)
                 
                 if price < trailing_stop or price < (trend * 0.98):
-                    # APPLY SLIPPAGE ON SELL
                     executed_sell_price = price * (1 - SLIPPAGE_BPS)
                     exit_revenue = share_count * executed_sell_price
                     
                     raw_trade_profit = exit_revenue - entry_capital
                     
-                    # APPLY TAX DRAG (If profit, take 20% out of the compounding pool)
                     if raw_trade_profit > 0:
                         tax_bite = raw_trade_profit * ESTIMATED_TAX_RATE
                         actual_profit = raw_trade_profit - tax_bite
@@ -75,10 +70,8 @@ class RealityEngine:
                 else:
                     peak_price = max(peak_price, high)
 
-            # 2. REALISTIC ENTRY
             elif share_count == 0 and cash_balance > MIN_TRADE_SIZE:
                 if price > trend and price > breakout:
-                    # APPLY SLIPPAGE ON BUY
                     executed_buy_price = price * (1 + SLIPPAGE_BPS)
                     entry_capital = cash_balance * 0.95 # 5% cash reserve
                     
@@ -111,7 +104,6 @@ def run_reality_audit():
         results, stats = RealityEngine.execute_realistic_sim(data, ticker)
         summaries.append(stats)
         
-        # Plot Reality vs Market
         plt.figure(figsize=(12, 5))
         plt.plot(results.index, results['Reality_Equity'], label='Bot (After Tax & Slippage)', color='red')
         plt.plot(results.index, results['Market_Growth'], label='Market (Buy & Hold)', color='gray', alpha=0.5)
