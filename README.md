@@ -21,7 +21,7 @@
   - Momentum Continuations
   - News-driven signals
 
-### Stage 3: Signal Generation & Backtesting (`stage3_signal_backtest.py`)
+### Stage 3: Signal Generation & Backtesting (`BotMod2.py`)
 - Load Stage 2 CSVs.
 - Generate deterministic **long/short/neutral signals** based on multi-indicator conditions:
   - RSI oversold/overbought
