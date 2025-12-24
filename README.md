@@ -40,7 +40,32 @@
   - Signal-enriched CSVs
   - Strategy performance summary
   - Plots with price, buy/sell markers, equity curve
- 
+
+ # 📈 Stage 4 — Machine Learning Alpha Research & Validation
+
+## Overview
+
+**Stage 4** is the **machine-learning research and validation layer** of the trading system.
+
+At this stage, raw market features produced in **Stage 2** are converted into **predictive signals** using **supervised machine learning**, and rigorously evaluated using **walk-forward testing** to ensure realism and prevent data leakage.
+
+This stage answers one core question:
+
+> **Does non-linear machine learning generate alpha beyond simple linear models?**
+
+---
+
+## Objectives
+
+- Train **leak-safe ML models** on historical market data
+- Compare **non-linear ML (Gradient Boosting)** against a **linear benchmark**
+- Evaluate performance using **quant-grade metrics**
+- Penalize trading using **realistic friction**
+- Produce research artifacts (equity curves, metrics, alpha attribution)
+
+
+
+
 
 
 Install dependencies
