@@ -8,7 +8,6 @@ import nltk
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 
 # ==================== SETUP ====================
-# Ensure VADER lexicon is downloaded
 try:
     nltk.data.find('sentiment/vader_lexicon.zip')
 except LookupError:
@@ -18,7 +17,6 @@ sentiment_analyzer = SentimentIntensityAnalyzer()
 
 TICKERS = ['AAPL','MSFT','NVDA','GOOGL','AMZN','META','JPM','V','MA','UNH']
 START_DATE = "2020-01-01"
-# Get today's date for filename/logging
 TODAY = datetime.now().strftime('%Y-%m-%d')
 
 OUTPUT_DIR = "bot_ready_data"
@@ -27,7 +25,6 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # ==================== DATA DOWNLOAD ====================
 def download_market_data(tickers):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Downloading market data...")
-    # 'group_by' is essential for multi-ticker downloads
     try:
         data = yf.download(
             tickers,
@@ -42,20 +39,17 @@ def download_market_data(tickers):
         print(f"Critical Download Error: {e}")
         return None
 
-# ==================== NEWS SENTIMENT (FIXED) ====================
+# ==================== NEWS SENTIMENT(FIX)====================
 def get_yfinance_sentiment(ticker):
     """
     Uses yfinance API instead of raw scraping to avoid blocking/ban.
     """
     try:
-        # yf.Ticker object fetches official news stream
         t = yf.Ticker(ticker)
         news_list = t.news
         
         if not news_list:
             return 0.0, "No news found"
-
-        # Combine titles of the latest 5-10 articles
         headlines = [n.get('title', '') for n in news_list][:10]
         text_block = " ".join(headlines)
         
@@ -63,8 +57,7 @@ def get_yfinance_sentiment(ticker):
             return 0.0, "Empty headlines"
 
         score = sentiment_analyzer.polarity_scores(text_block)["compound"]
-        return score, text_block[:500] # Return snippet for verification
-
+        return score, text_block[:500]
     except Exception as e:
         # Fallback if API changes
         print(f"Sentiment Error for {ticker}: {e}")
@@ -117,35 +110,21 @@ def compute_indicators(df):
 
 # ==================== PROCESS ONE STOCK ====================
 def process_stock(raw_data, ticker):
-    # Handle yfinance MultiIndex structure safely
     try:
-        # Check if the dataframe is MultiIndex (multiple tickers) or Single Index
         if isinstance(raw_data.columns, pd.MultiIndex):
             stock = raw_data[ticker].copy()
         else:
-            # If only 1 ticker was downloaded, yfinance doesn't use MultiIndex
             stock = raw_data.copy()
-            
-        # Ensure we have required columns
+
         required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
         if not all(col in stock.columns for col in required_cols):
             print(f"Skipping {ticker}: Missing columns.")
             return None
-
-        # 1. Compute Technicals
         stock = compute_indicators(stock)
 
-        # 2. Get Sentiment (CURRENT SNAPSHOT ONLY)
-        # Note: Renamed column to 'Latest_Sentiment' to avoid confusion 
-        # that this sentiment applies to historical rows.
         sentiment_score, news_text = get_yfinance_sentiment(ticker)
-        
-        # We fill the WHOLE column for plotting convenience, 
-        # but in ML, use this feature with caution (Lookahead bias warning)
         stock['Latest_News_Sentiment'] = sentiment_score
         stock['News_Summary'] = news_text
-
-        # Clean up NaNs created by rolling windows
         stock.dropna(inplace=True)
         stock.reset_index(inplace=True)
 
@@ -157,7 +136,6 @@ def process_stock(raw_data, ticker):
 
 # ==================== PLOTTING ====================
 def plot_stock(df, ticker):
-    # Check if df is empty before plotting
     if df.empty:
         return
 
@@ -186,7 +164,7 @@ def plot_stock(df, ticker):
     plt.tight_layout()
 
     plt.savefig(f"{OUTPUT_DIR}/{ticker}_analysis.png")
-    plt.close() # Close figure to free memory
+    plt.close()
 
 # ==================== PIPELINE ====================
 def run_pipeline():
@@ -221,9 +199,6 @@ if __name__ == "__main__":
         run_pipeline()
         
         print(f"\nPipeline finished. Sleeping for {UPDATE_INTERVAL/60} minutes...")
-        # Note: In a real bot, you usually don't ask for Input AND sleep. 
-        # This setup waits for the sleep to finish before letting you type 'exit'.
-        # For a simpler manual trigger, remove the sleep below.
         try:
             time.sleep(UPDATE_INTERVAL)
         except KeyboardInterrupt:
