@@ -7,7 +7,7 @@ from datetime import datetime
 import nltk
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 
-# ==================== SETUP ====================
+# ==================== FOREX SETUP ====================
 try:
     nltk.data.find('sentiment/vader_lexicon.zip')
 except LookupError:
@@ -15,192 +15,125 @@ except LookupError:
 
 sentiment_analyzer = SentimentIntensityAnalyzer()
 
-TICKERS = ['AAPL','MSFT','NVDA','GOOGL','AMZN','META','JPM','V','MA','UNH']
+# Major FX Pairs (Yahoo Finance suffix is '=X')
+FOREX_PAIRS = ['EURUSD=X', 'GBPUSD=X', 'USDJPY=X', 'AUDUSD=X', 'USDCAD=X', 'USDCHF=X', 'EURJPY=X']
 START_DATE = "2020-01-01"
-TODAY = datetime.now().strftime('%Y-%m-%d')
-
-OUTPUT_DIR = "bot_ready_data"
+OUTPUT_DIR = "forex_ready_data"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# ==================== DATA DOWNLOAD ====================
-def download_market_data(tickers):
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Downloading market data...")
+# ==================== FX DATA DOWNLOAD ====================
+def download_forex_data(pairs):
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Downloading Forex Pairs...")
     try:
         data = yf.download(
-            tickers,
+            pairs,
             start=START_DATE,
+            interval="1d",
             group_by="ticker",
-            auto_adjust=False, # Use False if you want unadjusted Close for true OHLC
+            auto_adjust=True, # Critical for FX to handle roll-over adjustments
             threads=True, 
             progress=False
         )
         return data
     except Exception as e:
-        print(f"Critical Download Error: {e}")
+        print(f"Forex Download Error: {e}")
         return None
 
-# ==================== NEWS SENTIMENT(FIX)====================
-def get_yfinance_sentiment(ticker):
+# ==================== FX SENTIMENT ====================
+def get_forex_sentiment(pair):
     """
-    Uses yfinance API instead of raw scraping to avoid blocking/ban.
+    Forex sentiment is macro-driven. 
+    Searches for the base and quote currencies.
     """
     try:
-        t = yf.Ticker(ticker)
-        news_list = t.news
+        base_currency = pair[:3]
+        t = yf.Ticker(pair)
+        news_list = t.news[:10]
         
         if not news_list:
-            return 0.0, "No news found"
-        headlines = [n.get('title', '') for n in news_list][:10]
+            return 0.0, "Neutral Macro"
+
+        headlines = [n.get('title', '') for n in news_list]
         text_block = " ".join(headlines)
         
-        if not text_block:
-            return 0.0, "Empty headlines"
-
         score = sentiment_analyzer.polarity_scores(text_block)["compound"]
         return score, text_block[:500]
     except Exception as e:
-        # Fallback if API changes
-        print(f"Sentiment Error for {ticker}: {e}")
-        return 0.0, "Error"
+        return 0.0, f"Sentiment Error: {e}"
 
-# ==================== INDICATORS ====================
-def compute_indicators(df):
+# ==================== FX INDICATORS (PIP-AWARE) ====================
+def compute_fx_indicators(df, ticker):
     df = df.copy()
     
-    # Basic Return
-    df['Return'] = df['Close'].pct_change()
+    # 1. Pip Calculation Logic
+    # JPY pairs use 0.01 per pip; most others use 0.0001
+    is_jpy = "JPY" in ticker
+    pip_unit = 0.01 if is_jpy else 0.0001
     
-    # Moving Averages
-    df['MA20'] = df['Close'].rolling(20).mean()
+    # 2. Basic Returns & Pip Volatility
+    df['Return'] = df['Close'].pct_change()
+    df['Pip_Change'] = (df['Close'].diff() / pip_unit)
+    
+    # 3. Moving Averages (Institutional Levels)
     df['MA50'] = df['Close'].rolling(50).mean()
     df['MA200'] = df['Close'].rolling(200).mean()
 
-    # Volatility (Annualized)
-    df['Volatility'] = df['Return'].rolling(20).std() * np.sqrt(252)
+    # 4. ATR (Average True Range) - THE most important FX metric
+    high_low = df['High'] - df['Low']
+    high_pc = np.abs(df['High'] - df['Close'].shift())
+    low_pc = np.abs(df['Low'] - df['Close'].shift())
+    tr = pd.concat([high_low, high_pc, low_pc], axis=1).max(axis=1)
+    df['ATR_Pips'] = tr.rolling(14).mean() / pip_unit
 
-    # RSI (Corrected to use EWM / Wilder's Smoothing)
+    # 5. RSI (Wilder's Smoothing for FX Reversals)
     delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0))
-    loss = (-delta.where(delta < 0, 0))
-    
-    # Use exponential moving average for RSI standard
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
     avg_gain = gain.ewm(com=13, adjust=False).mean()
     avg_loss = loss.ewm(com=13, adjust=False).mean()
-    
     rs = avg_gain / avg_loss
     df['RSI'] = 100 - (100 / (1 + rs))
 
-    # MACD
-    ema12 = df['Close'].ewm(span=12, adjust=False).mean()
-    ema26 = df['Close'].ewm(span=26, adjust=False).mean()
-    df['MACD'] = ema12 - ema26
-    df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-
-    # Liquidity proxy
-    df['Liquidity'] = df['Volume'] * df['Close']
-
-    # Trend Logic
-    df['Trend_Break'] = ((df['Close'] < df['MA50']) &
-                          (df['Close'].shift(1) > df['MA50'].shift(1))).astype(int)
-
-    # Reversal Logic
-    df['Reversal'] = ((df['RSI'] < 30) & (df['Return'] > 0)).astype(int)
-
+    # 6. Trend Identification Logic
+    # Forex is mean-reverting; we look for "Stretches" away from the MA
+    df['Distance_MA200_Pips'] = (df['Close'] - df['MA200']) / pip_unit
+    
     return df
 
-# ==================== PROCESS ONE STOCK ====================
-def process_stock(raw_data, ticker):
+# ==================== FX PROCESSOR ====================
+def process_fx_pair(raw_data, ticker):
     try:
         if isinstance(raw_data.columns, pd.MultiIndex):
-            stock = raw_data[ticker].copy()
+            pair_data = raw_data[ticker].copy()
         else:
-            stock = raw_data.copy()
+            pair_data = raw_data.copy()
 
-        required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
-        if not all(col in stock.columns for col in required_cols):
-            print(f"Skipping {ticker}: Missing columns.")
-            return None
-        stock = compute_indicators(stock)
+        # Forex OHLC Check
+        pair_data = compute_fx_indicators(pair_data, ticker)
+        
+        sentiment_score, news_summary = get_forex_sentiment(ticker)
+        pair_data['Latest_Macro_Sentiment'] = sentiment_score
+        pair_data['Macro_Summary'] = news_summary
 
-        sentiment_score, news_text = get_yfinance_sentiment(ticker)
-        stock['Latest_News_Sentiment'] = sentiment_score
-        stock['News_Summary'] = news_text
-        stock.dropna(inplace=True)
-        stock.reset_index(inplace=True)
+        pair_data.dropna(inplace=True)
+        pair_data.reset_index(inplace=True)
+        return pair_data
 
-        return stock
-
-    except KeyError:
-        print(f"Ticker {ticker} not found in downloaded data.")
+    except Exception as e:
+        print(f"Error processing {ticker}: {e}")
         return None
 
-# ==================== PLOTTING ====================
-def plot_stock(df, ticker):
-    if df.empty:
-        return
-
-    plt.figure(figsize=(14,8))
-    
-    plt.plot(df['Date'], df['Close'], label="Price", linewidth=2, alpha=0.8)
-    plt.plot(df['Date'], df['MA50'], label="MA50", linestyle='--')
-    plt.plot(df['Date'], df['MA200'], label="MA200", linestyle='--')
-
-    # Add Reversal markers
-    reversals = df[df['Reversal'] == 1]
-    if not reversals.empty:
-        plt.scatter(reversals['Date'], reversals['Close'],
-                    color='green', label='RSI Reversal', s=60, zorder=5)
-
-    # Add Trend Break markers
-    breaks = df[df['Trend_Break'] == 1]
-    if not breaks.empty:
-        plt.scatter(breaks['Date'], breaks['Close'],
-                    color='red', label='Trend Break', s=60, zorder=5)
-
-    current_sent = df['Latest_News_Sentiment'].iloc[-1]
-    plt.title(f"{ticker} Analysis | Current Sentiment: {current_sent:.4f}")
-    plt.legend()
-    plt.grid(alpha=0.3)
-    plt.tight_layout()
-
-    plt.savefig(f"{OUTPUT_DIR}/{ticker}_analysis.png")
-    plt.close()
-
 # ==================== PIPELINE ====================
-def run_pipeline():
-    raw = download_market_data(TICKERS)
+def run_fx_pipeline():
+    raw = download_forex_data(FOREX_PAIRS)
+    if raw is None or raw.empty: return
 
-    if raw is None or raw.empty:
-        print("Market download failed.")
-        return
+    for ticker in FOREX_PAIRS:
+        df = process_fx_pair(raw, ticker)
+        if df is not None:
+            clean_name = ticker.replace('=X', '')
+            df.to_csv(f"{OUTPUT_DIR}/{clean_name}_data.csv", index=False)
+            print(f"Done: {clean_name} | RSI: {df['RSI'].iloc[-1]:.2f} | ATR (Pips): {df['ATR_Pips'].iloc[-1]:.1f}")
 
-    for ticker in TICKERS:
-        print(f"Processing {ticker}...")
-        df = process_stock(raw, ticker)
-
-        if df is not None and not df.empty:
-            df.to_csv(f"{OUTPUT_DIR}/{ticker}_data.csv", index=False)
-            plot_stock(df, ticker)
-            print(f"Saved {ticker} -> Sentiment: {df['Latest_News_Sentiment'].iloc[-1]:.2f}")
-        else:
-            print(f"Skipping {ticker} (Insufficient Data)")
-
-# ==================== LOOP CONTROL ====================
 if __name__ == "__main__":
-    UPDATE_INTERVAL = 1800 # 30 mins
-    
-    while True:
-        user = input("\n>> Press Enter to run update or type 'exit' to quit: ").lower()
-        if user == "exit":
-            print("Pipeline stopped.")
-            break
-
-        print(f"\n=== Pipeline Run: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
-        run_pipeline()
-        
-        print(f"\nPipeline finished. Sleeping for {UPDATE_INTERVAL/60} minutes...")
-        try:
-            time.sleep(UPDATE_INTERVAL)
-        except KeyboardInterrupt:
-            print("\nSleep interrupted by user.")
-            continue
+    run_fx_pipeline()
