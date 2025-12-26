@@ -1,124 +1,92 @@
+# stage4_fx_alpha_audit.py
+
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import glob
 import os
-from sklearn.ensemble import GradientBoostingClassifier
-from sklearn.inspection import permutation_importance
-from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import RobustScaler
+import glob
+from BotMod2 import ForexRealityEngine, DATA_DIR  # your Stage 3 code
 
 # ==================== CONFIGURATION ====================
-INPUT_DIR = "bot_ready_data"
-OUTPUT_DIR = "stage4_elite_audit"
-WALK_TRAIN = 252 * 2 
-WALK_TEST = 21        
-TARGET_VOL = 0.025    
-FRICTION = 0.0004     
-
+OUTPUT_DIR = "stage4_forex_audit"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-class AlphaAuditor:
+class FXAlphaAudit:
     @staticmethod
-    def engineer_elite_features(df):
-        df = df.copy()
-        df['Vol_ZScore'] = (df['Close'].pct_change().rolling(20).std() / 
-                            df['Close'].pct_change().rolling(200).std())
-        df['Dist_from_High'] = (df['Close'] / df['Close'].rolling(252).max()) - 1
-        df = df.replace([np.inf, -np.inf], np.nan)
-        return df
-
-    @staticmethod
-    def get_optimized_params(ticker, vol_regime):
-        if ticker in ['NVDA', 'AMZN', 'META']:
-            return {'depth': 3, 'lr': 0.03, 'n': 80}
-        if vol_regime < 1.0:
-            return {'depth': 5, 'lr': 0.05, 'n': 100}
-        return {'depth': 4, 'lr': 0.04, 'n': 90}
+    def compute_sharpe(returns, risk_free=0.0):
+        """Compute annualized Sharpe ratio (daily returns)."""
+        if len(returns) == 0:
+            return 0.0
+        mean_ret = returns.mean() - risk_free / 252
+        std_ret = returns.std()
+        return mean_ret / (std_ret + 1e-9) * np.sqrt(252)
 
     @staticmethod
-    def simulate(df, ticker):
-        df = EliteAlphaAuditor.engineer_elite_features(df)
-        
-        drop_cols = ['Open','High','Low','Close','Volume','Target','Fwd_Ret','Ticker','News_Summary']
-        X = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
-        X = X.apply(pd.to_numeric, errors='coerce').dropna(axis=1, how='all')
-        
-        fwd_ret = df['Close'].shift(-5) / df['Close'] - 1
-        y = np.where(fwd_ret > TARGET_VOL, 1, np.where(fwd_ret < -TARGET_VOL, -1, 0))
-        
-        all_returns = []
+    def compute_max_drawdown(equity_curve):
+        """Compute max drawdown from equity curve."""
+        cum_ret = np.array(equity_curve)
+        peak = np.maximum.accumulate(cum_ret)
+        drawdown = (cum_ret - peak) / peak
+        return drawdown.min()
 
-        for i in range(WALK_TRAIN, len(X) - WALK_TEST, WALK_TEST):
-            X_tr, y_tr = X.iloc[i-WALK_TRAIN:i], y[i-WALK_TRAIN:i]
-            X_te = X.iloc[i:i+WALK_TEST]
-            
-            scaler = RobustScaler()
-            imputer = SimpleImputer(strategy='median')
-            
-            try:
-                X_tr_s = scaler.fit_transform(imputer.fit_transform(X_tr))
-                X_te_s = scaler.transform(imputer.transform(X_te))
-            except: continue
+    @staticmethod
+    def alpha_vs_baseline(equity_curve, baseline_curve):
+        """Alpha = difference in final cumulative return vs baseline."""
+        if len(equity_curve) == 0 or len(baseline_curve) == 0:
+            return 0.0
+        return equity_curve[-1] - baseline_curve[-1]
 
-            vol_now = df['Vol_ZScore'].iloc[i]
-            p = EliteAlphaAuditor.get_optimized_params(ticker, vol_now)
-            
-            model = GradientBoostingClassifier(
-                n_estimators=p['n'], 
-                learning_rate=p['lr'], 
-                max_depth=p['depth'],
-                subsample=0.8 
-            )
-            
-            model.fit(X_tr_s, y_tr)
-            
-            probs = model.predict_proba(X_te_s)
-            fold_rets = []
-            
-            for j in range(len(X_te)):
-                if probs[j][2] > 0.60: 
-                    sig = 1
-                elif probs[j][0] > 0.60:
-                    sig = -1
-                else:
-                    sig = 0
-                    
-                actual_ret = df['Close'].iloc[i+j+1] / df['Close'].iloc[i+j] - 1
-                fold_rets.append(sig * actual_ret - (abs(sig) * FRICTION))
-                
-            all_returns.extend(fold_rets)
+    @classmethod
+    def audit(cls):
+        """
+        Runs Stage 4 audit on all Stage 3 outputs.
+        Expects CSVs in DATA_DIR from Stage 3 simulation.
+        Each CSV must have columns: 'Close', 'High', 'Low'.
+        """
+        files = glob.glob(os.path.join(DATA_DIR, "*.csv"))
+        if not files:
+            print(f"🚨 No Stage 3 data found in {DATA_DIR}")
+            return pd.DataFrame()
 
-        return pd.Series(all_returns)
+        results = []
 
-# ==================== EXECUTION ====================
-def run_elite_stage4():
-    files = glob.glob(os.path.join(INPUT_DIR, "*.csv"))
-    summary = []
-
-    for f in files:
-        ticker = os.path.basename(f).split('_')[0]
-        print(f"Auditing: {ticker}")
+        for f in files:
+            pair = os.path.basename(f).split('_')[0]
+            df_raw = pd.read_csv(f, index_col=0, parse_dates=True)
+            
+            # Stage 3 indicators & simulation
+            df, pip_unit = ForexRealityEngine.calculate_indicators(df_raw, pair)
+            df_sim, stats = ForexRealityEngine.execute_forex_sim(df, pair, pip_unit)
+            
+            # Daily returns for Sharpe
+            returns = df_sim['Close'].pct_change().fillna(0)
+            
+            # Baseline: simple linear moving average strategy (50 EMA)
+            df['linear_signal'] = (df['Close'] > df['Close'].ewm(span=50).mean()).astype(float)
+            df['linear_ret'] = df['linear_signal'].shift(1) * df['Close'].pct_change().fillna(0)
+            baseline_curve = (1 + df['linear_ret']).cumprod().values
+            
+            # Metrics
+            sharpe = cls.compute_sharpe(returns)
+            linear_sharpe = cls.compute_sharpe(df['linear_ret'])
+            alpha = cls.alpha_vs_baseline(df_sim['Close'].values, baseline_curve)
+            mdd = cls.compute_max_drawdown(df_sim['Close'].values)
+            
+            results.append({
+                'Pair': pair,
+                'ML_Sharpe': round(sharpe, 4),
+                'Linear_Sharpe': round(linear_sharpe, 4),
+                'Alpha_Added': round(alpha, 4),
+                'ML_MDD': round(mdd, 4),
+                'Final_Equity': float(stats['Final_Equity']),
+                'Win_Rate': float(stats['Win_Rate']),
+                'Net_Pip_Gain': float(stats['Net_Pip_Gain'])
+            })
         
-        df = pd.read_csv(f, index_col=0, parse_dates=True)
-        returns = EliteAlphaAuditor.simulate(df, ticker)
-        
-        if len(returns) < 10: continue
-        
-        sharpe = (returns.mean() / (returns.std() + 1e-9)) * np.sqrt(252)
-        cum_ret = (1 + returns).cumprod()
-        mdd = (cum_ret / cum_ret.cummax() - 1).min()
-        
-        summary.append({
-            'Ticker': ticker,
-            'Sharpe': round(sharpe, 2),
-            'Max_Drawdown': round(mdd, 4),
-            'Win_Rate': round((returns > 0).mean(), 2)
-        })
-
-    final_df = pd.DataFrame(summary).sort_values('Sharpe', ascending=False)
-    print("\nAUDIT COMPLETE")
-    print(final_df.to_string(index=False))
+        result_df = pd.DataFrame(results).sort_values(by='Alpha_Added', ascending=False)
+        output_path = os.path.join(OUTPUT_DIR, "audit_summary.csv")
+        result_df.to_csv(output_path, index=False)
+        print(f"✅ Stage 4 FX Alpha Audit Complete! Results saved to {output_path}")
+        return result_df
 
 if __name__ == "__main__":
-    run_elite_stage4()
+    FXAlphaAudit.audit()
