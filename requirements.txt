@@ -1,19 +1,7 @@
-# Data handling
-pandas==1.5.3
-numpy==1.25.0
-
-# Visualization (Stage 3)
-matplotlib==3.7.1
-
-# MetaTrader 5 integration (Windows only)
-MetaTrader5==5.0.37
-
-# Logging & datetime utilities
-python-dateutil==2.8.2
-pytz==2023.3
-
-# Retry/backoff mechanism for Stage 6
-backoff==2.2.1
-
-# Optional: for glob, OS handling (built-in, included for reference)
-# glob, os, sys -> built-in modules, no install needed
+yfinance
+pandas
+numpy
+scipy
+scikit-learn
+nltk
+matplotlib
