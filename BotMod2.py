@@ -4,130 +4,119 @@ import matplotlib.pyplot as plt
 import os
 import glob
 
-# ==================== FOREX REALITY CONFIG ====================
-DATA_DIR = "forex_ready_data"
-OUTPUT_DIR = "forex_reality_results"
+# ==================== REALITY-CHECK CONFIG ====================
+DATA_DIR = "bot_ready_data"
+OUTPUT_DIR = "reality_check_results"
 INITIAL_CAP = 100000.0
 
-# FOREX FRICTION CONSTANTS
-# 1. Spread (measured in pips)
-AVG_SPREAD_PIPS = 1.5      
-# 2. Swap/Rollover (Daily interest drag, ~0.005% per day)
-DAILY_SWAP_RATE = 0.00005  
-# 3. Leverage (e.g., 30:1)
-LEVERAGE = 30.0            
+# FRICTION CONSTANTS
+SLIPPAGE_BPS = 0.0010      
+ESTIMATED_TAX_RATE = 0.20  
+MIN_TRADE_SIZE = 500      
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-class ForexRealityEngine:
+class RealityEngine:
     @staticmethod
-    def calculate_indicators(df, ticker):
+    def calculate_indicators(df):
         df = df.copy()
-        is_jpy = "JPY" in ticker
-        pip_unit = 0.01 if is_jpy else 0.0001
-        
-        # Forex-Specific Indicators
-        df['trend_baseline'] = df['Close'].ewm(span=100).mean() # Faster for FX
-        df['atr_pips'] = (df['High'] - df['Low']).rolling(14).mean() / pip_unit
-        df['resistance'] = df['High'].rolling(20).max().shift(1)
-        return df.dropna(), pip_unit
+        df['trend_baseline'] = df['Close'].ewm(span=150).mean()
+        df['risk_buffer_atr'] = (df['High'] - df['Low']).rolling(14).mean()
+        df['breakout_threshold'] = df['High'].rolling(10).max().shift(1)
+        return df.dropna()
 
     @staticmethod
-    def execute_forex_sim(df, ticker, pip_unit):
+    def execute_realistic_sim(df, ticker):
         cash_balance = INITIAL_CAP
-        position_units = 0
-        entry_price = 0
+        share_count = 0
         peak_price = 0
         
         trade_logs = []
         equity_curve = []
         
-        friction_loss = 0
-        wins, losses, net_pip_profit = 0, 0, 0
+        total_friction_loss = 0
+        wins, losses, total_net_profit = 0, 0, 0
 
         for i in range(len(df)):
             date = df.index[i]
             price = df['Close'].iloc[i]
             high = df['High'].iloc[i]
-            low = df['Low'].iloc[i]
-            atr_val = df['atr_pips'].iloc[i] * pip_unit
+            atr = df['risk_buffer_atr'].iloc[i]
             trend = df['trend_baseline'].iloc[i]
-            resistance = df['resistance'].iloc[i]
+            breakout = df['breakout_threshold'].iloc[i]
 
-            # 1. POSITION MANAGEMENT (EXIT LOGIC)
-            if position_units > 0:
-                # Calculate daily swap drag
-                swap_cost = (position_units * price) * DAILY_SWAP_RATE
-                cash_balance -= swap_cost
-                friction_loss += swap_cost
+            if share_count > 0:
+                trailing_stop = peak_price - (3.5 * atr)
                 
-                # Trailing Stop based on Volatility
-                trailing_stop = peak_price - (2.5 * atr_val)
-                
-                if low < trailing_stop or price < (trend * 0.998):
-                    # APPLY SPREAD ON EXIT
-                    exit_price = min(price, trailing_stop) - (AVG_SPREAD_PIPS * pip_unit)
+                if price < trailing_stop or price < (trend * 0.98):
+                    executed_sell_price = price * (1 - SLIPPAGE_BPS)
+                    exit_revenue = share_count * executed_sell_price
                     
-                    pip_gain = (exit_price - entry_price) / pip_unit
-                    trade_result = position_units * (exit_price - entry_price)
+                    raw_trade_profit = exit_revenue - entry_capital
                     
-                    if trade_result > 0: wins += 1
-                    else: losses += 1
+                    if raw_trade_profit > 0:
+                        tax_bite = raw_trade_profit * ESTIMATED_TAX_RATE
+                        actual_profit = raw_trade_profit - tax_bite
+                        wins += 1
+                    else:
+                        tax_bite = 0
+                        actual_profit = raw_trade_profit
+                        losses += 1
                     
-                    cash_balance += (position_units * exit_price)
-                    net_pip_profit += pip_gain
-                    friction_loss += (AVG_SPREAD_PIPS * pip_unit * position_units)
+                    total_friction_loss += (entry_capital * SLIPPAGE_BPS) + (exit_revenue * SLIPPAGE_BPS) + tax_bite
+                    total_net_profit += actual_profit
+                    cash_balance += (exit_revenue - tax_bite)
                     
-                    position_units, entry_price, peak_price = 0, 0, 0
+                    trade_logs.append({'Date': date, 'Type': 'SELL', 'Profit': actual_profit})
+                    share_count, peak_price = 0, 0
                 else:
                     peak_price = max(peak_price, high)
 
-            # 2. ENTRY LOGIC (USING LEVERAGE)
-            elif position_units == 0:
-                if price > resistance and price > trend:
-                    # SPREAD ON ENTRY
-                    entry_price = price + (AVG_SPREAD_PIPS * pip_unit)
+            elif share_count == 0 and cash_balance > MIN_TRADE_SIZE:
+                if price > trend and price > breakout:
+                    executed_buy_price = price * (1 + SLIPPAGE_BPS)
+                    entry_capital = cash_balance * 0.95
                     
-                    # Risk-based sizing: Use 2% of equity for the stop-loss distance
-                    risk_amount = cash_balance * 0.02
-                    stop_dist = 2.5 * atr_val
-                    
-                    # Units = Risk / (Stop Distance in Price)
-                    position_units = risk_amount / stop_dist
-                    
-                    # Check margin (Ensure we aren't exceeding LEVERAGE)
-                    notional_value = position_units * entry_price
-                    if notional_value > (cash_balance * LEVERAGE):
-                        position_units = (cash_balance * LEVERAGE) / entry_price
-                    
-                    cash_balance -= (position_units * entry_price)
+                    share_count = entry_capital / executed_buy_price
+                    cash_balance -= entry_capital
                     peak_price = high
-                    friction_loss += (AVG_SPREAD_PIPS * pip_unit * position_units)
+                    trade_logs.append({'Date': date, 'Type': 'BUY', 'Price': executed_buy_price})
 
-            equity_curve.append(cash_balance + (position_units * price))
+            equity_curve.append(cash_balance + (share_count * price))
 
+        df['Reality_Equity'] = equity_curve
+        df['Market_Growth'] = (df['Close'] / df['Close'].iloc[0]) * INITIAL_CAP
+        
         return df, {
             'Ticker': ticker,
-            'Final_Equity': round(equity_curve[-1], 2),
-            'Total_Friction_Loss': round(friction_loss, 2),
-            'Net_Pip_Gain': round(net_pip_profit, 1),
+            'Reality_Final_Cash': round(equity_curve[-1], 2),
+            'Market_Final_Cash': round(df['Market_Growth'].iloc[-1], 2),
+            'Net_Profit_After_Tax': round(total_net_profit, 2),
+            'Friction_Loss_$': round(total_friction_loss, 2),
             'Win_Rate': round((wins/(wins+losses)*100), 2) if (wins+losses)>0 else 0
         }
 
-def run_forex_audit():
+def run_reality_audit():
     files = glob.glob(os.path.join(DATA_DIR, "*.csv"))
     summaries = []
 
     for f in files:
         ticker = os.path.basename(f).split('_')[0]
-        raw_df = pd.read_csv(f, index_col=0, parse_dates=True)
-        data, pip_unit = ForexRealityEngine.calculate_indicators(raw_df, ticker)
-        results, stats = ForexRealityEngine.execute_forex_sim(data, ticker, pip_unit)
+        data = RealityEngine.calculate_indicators(pd.read_csv(f, index_col=0, parse_dates=True))
+        results, stats = RealityEngine.execute_realistic_sim(data, ticker)
         summaries.append(stats)
         
+        plt.figure(figsize=(12, 5))
+        plt.plot(results.index, results['Reality_Equity'], label='Bot (After Tax & Slippage)', color='red')
+        plt.plot(results.index, results['Market_Growth'], label='Market (Buy & Hold)', color='gray', alpha=0.5)
+        plt.title(f"{ticker} REALITY CHECK")
+        plt.legend(); plt.savefig(f"{OUTPUT_DIR}/{ticker}_reality.png"); plt.close()
+
     summary_df = pd.DataFrame(summaries)
-    print("\n🌍 --- FOREX REALITY AUDIT (WITH SPREAD & SWAPS) --- 🌍")
+    summary_df.to_csv(f"{OUTPUT_DIR}/REAL_WORLD_AUDIT.csv", index=False)
+    print("\nCHECK SUMMARY")
     print(summary_df.to_string(index=False))
+    print(f"\nTotal Portfolio Profit (Post-Tax/Slippage): ${summary_df['Net_Profit_After_Tax'].sum():,.2f}")
 
 if __name__ == "__main__":
-    run_forex_audit()
+    run_reality_audit()
