@@ -1,41 +1,31 @@
-🌍 Apex Forex Trading Bot
+# Quantitative Trading and Risk Management Pipeline
 
-Automated Forex portfolio engine with machine learning alpha signals, dynamic risk allocation, and MT5 integration for live and paper trading.
+This repository contains a multi-stage quantitative system for market data ingestion, alpha generation using machine learning, and institutional-grade risk auditing.
 
-Overview
+## Pipeline Stages
 
-This system is designed to run a full quantitative Forex workflow:
+### Stage 1: Data Ingestion and Sentiment Analysis
+Downloads market data for selected tickers and performs sentiment analysis on current news headlines using the VADER lexicon. It calculates technical indicators including RSI, MACD, and moving averages.
 
-Stage	Function
-Stage 3 – Forex Reality	Processes raw Forex OHLC data, computes volatility-adjusted signals, and simulates trades with spreads, swaps, and leverage.
-Stage 4 – FX Alpha Audit	Generates risk-adjusted alpha metrics, Sharpe ratios, and max drawdowns, comparing ML strategies to linear baselines.
-Stage 5 – FX Portfolio Engine	Builds a dynamically scaled, currency-safe portfolio, applying maximum exposure caps per pair and per currency.
-Stage 6 – MT5 Execution Engine	Connects to MetaTrader 5 desktop, executes trades automatically according to the Stage 5 portfolio, supports trailing stops, and risk-aware rebalancing.
-System Requirements
+### Stage 2: Realistic Simulation
+Runs backtests that incorporate real-world friction such as slippage and estimated tax rates. It uses ATR-based trailing stops to simulate professional exit strategies.
 
-Python 3.10+
+### Stage 3: Alpha Audit
+Uses a Gradient Boosting Classifier and walk-forward validation to evaluate signal quality. It compares the strategy's Sharpe ratio against the market benchmark to determine alpha.
 
-Libraries: pandas, numpy, MetaTrader5, matplotlib (for Stage 3/visualization)
+### Stage 4: Portfolio Optimization
+Detects the current market regime (Bull, Bear, or Crisis) and performs risk-parity optimization. It adjusts asset exposure based on the detected regime and minimizes covariance and correlation penalties.
 
-MetaTrader 5 Desktop (Windows) – Required for live/paper trading
+### Stage 5: Extreme Risk Audit
+Performs a multivariate block bootstrap to preserve cross-asset correlations and volatility clustering. It calculates 99% Value-at-Risk (VaR) and Expected Shortfall (ES) over a 21-day horizon.
 
-Data Directory: OHLC CSVs for each FX pair
+## Usage
+The scripts are designed to be executed in sequence:
+1. BotMod1.py
+2. BotMod2.py
+3. BotMod3.py
+4. BotMod4.py
+5. BotMod5.py
 
-Installation
-git clone <repo_url>
-cd apex-forex-bot
-python -m venv bot_env
-source bot_env/bin/activate       # Linux / Mac
-# bot_env\Scripts\activate       # Windows
-pip install -r requirements.txt
-
-
-requirements.txt example:
-
-pandas
-numpy
-matplotlib
-MetaTrader5
-
-
-⚠️ Note: The MetaTrader5 Python package only works with the desktop terminal, not the web version.
+## Disclaimer
+This project is for research purposes only. Trading involves significant risk of loss.
