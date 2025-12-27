@@ -2,116 +2,168 @@ import pandas as pd
 import numpy as np
 import os
 import sys
+from datetime import datetime
+from scipy.optimize import minimize
 
-# ==================== CONFIGURATION ====================
-STAGE4_PATH = "stage4_forex_audit/audit_summary.csv"  # Stage 4 output
+# ==================== MASTER CONFIGURATION ====================
+INPUT_PATH = "stage4_elite_audit/elite_audit_summary.csv"
 OUTPUT_DIR = "stage5_portfolio"
 
-# FX Specific Caps
-MAX_SINGLE_PAIR = 0.25       # Max 25% allocation per currency pair
-MAX_CURRENCY_EXPOSURE = 0.40 # Max 40% exposure to any single currency
-MIN_PAIRS = 3                # Minimum pairs for full capital deployment
+MAX_ASSETS = 8
+MIN_ASSETS = 3
+MAX_ALLOCATION = 0.35
+MIN_ALLOCATION = 0.05
+CASH_BUFFER = 0.05
 
-# Qualification thresholds
-EQUITY_THRESHOLD = 100000    # Minimum final equity to consider
-WIN_RATE_THRESHOLD = 0.48    # Minimum win rate to qualify
+BEAR_MARKET_SHARPE = 0.2
+CRISIS_MARKET_MDD = -0.15
 
-# Cash
-CASH_TICKER = "CASH_USD"
+CORRELATION_PENALTY = 0.5
+TARGET_VOLATILITY = 0.15
 
-# Ensure output directory exists
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-class Stage5ForexPortfolio:
-    def __init__(self, input_csv):
-        self.input_csv = input_csv
-        self.weights_df = None
-        self.qualified = None
+# ==================== METRICS ====================
+class AdvancedMetrics:
+    @staticmethod
+    def calculate_conviction(row):
+        mdd_penalty = abs(row['GBM_MDD']) * 3.0
+        alpha_boost = row['Alpha_Added'] * 5.0
+        sharpe_base = row['GBM_Sharpe'] * 2.0
+        return sharpe_base + alpha_boost - mdd_penalty
 
-    def load_and_filter(self):
-        """Load Stage 4 audit and filter high-quality signals."""
-        if not os.path.exists(self.input_csv):
-            sys.exit(f"FATAL: Stage 4 data missing: {self.input_csv}")
+# ==================== REGIME ====================
+class RegimeDetector:
+    @staticmethod
+    def detect_regime(df):
+        top = df.sort_values('GBM_Sharpe', ascending=False).head(5)
+        if top.empty:
+            return "CRISIS"
+        if top['GBM_MDD'].mean() < CRISIS_MARKET_MDD:
+            return "CRISIS"
+        if top['GBM_Sharpe'].mean() < BEAR_MARKET_SHARPE:
+            return "BEAR"
+        return "BULL"
 
-        df = pd.read_csv(self.input_csv)
-        required_cols = ['Pair', 'Final_Equity', 'Win_Rate', 'Net_Pip_Gain']
-        missing = [c for c in required_cols if c not in df.columns]
-        if missing:
-            sys.exit(f"FATAL: Stage 4 CSV missing columns: {missing}")
+# ==================== OPTIMIZER ====================
+class CitadelGradeOptimizer:
+    @staticmethod
+    def get_correlation_matrix(tickers):
+        data = {}
+        for t in tickers:
+            try:
+                df = pd.read_csv(f"bot_ready_data/{t}_data.csv", index_col=0)
+                data[t] = df['Close'].pct_change()
+            except:
+                continue
+        returns = pd.DataFrame(data).dropna()
+        return returns.corr(), returns.cov()
 
-        # Filter for quality signals
-        mask = (df['Final_Equity'] >= EQUITY_THRESHOLD) & (df['Win_Rate'] >= WIN_RATE_THRESHOLD)
-        self.qualified = df[mask].copy()
+    @staticmethod
+    def optimize_risk_parity(assets):
+        tickers = assets['Ticker'].tolist()
+        corr, cov = CitadelGradeOptimizer.get_correlation_matrix(tickers)
 
-        if self.qualified.empty:
-            print("🚨 NO QUALIFIED SIGNALS. PARKING IN CASH.")
-            self._park_in_cash()
-            sys.exit(0)
+        if corr.empty:
+            return assets['Apex_Score'] / assets['Apex_Score'].sum()
 
-    def calculate_fx_weights(self):
-        """Compute pair weights with caps and currency exposure limits."""
-        df = self.qualified.copy()
+        n = len(tickers)
+        x0 = np.array([1 / n] * n)
+        bounds = [(0.02, 0.40)] * n
+        cons = {'type': 'eq', 'fun': lambda x: np.sum(x) - 1}
 
-        # Conviction score: combine equity and win rate
-        df['Conviction'] = df['Final_Equity'] * df['Win_Rate']
+        def objective(w):
+            var = np.dot(w.T, np.dot(cov, w))
+            corr_penalty = np.sum(np.dot(w.T, np.dot(corr, w))) * CORRELATION_PENALTY
+            return var + corr_penalty
 
-        # Raw weights proportional to squared conviction (convex scaling)
-        total_conviction = (df['Conviction'] ** 2).sum()
-        df['Raw_Weight'] = (df['Conviction'] ** 2) / total_conviction
+        res = minimize(objective, x0, method='SLSQP', bounds=bounds, constraints=cons)
+        return res.x if res.success else x0
 
-        # Apply pair and currency caps
-        weights = {}
-        currency_exposure = {}
+# ==================== ENGINE ====================
+class ApexPortfolioEngine:
+    def __init__(self):
+        if not os.path.exists(INPUT_PATH):
+            sys.exit(f"FATAL: Missing {INPUT_PATH}")
+        self.raw_df = pd.read_csv(INPUT_PATH)
+        self.regime = "UNKNOWN"
+        self.portfolio = None
+        self.diagnostics = []
 
-        for _, row in df.iterrows():
-            pair = row['Pair'].replace('=X', '')
-            base, quote = pair[:3], pair[3:]
+    def log(self, msg):
+        print(f"[ApexEngine] {msg}")
+        self.diagnostics.append(msg)
 
-            weight = min(row['Raw_Weight'], MAX_SINGLE_PAIR)
+    def run_selection_waterfall(self):
+        df = self.raw_df.copy()
+        self.regime = RegimeDetector.detect_regime(df)
+        self.log(f"Market Regime Detected: {self.regime}")
 
-            # Check currency exposure
-            if currency_exposure.get(base, 0) + weight > MAX_CURRENCY_EXPOSURE:
-                weight = max(0, MAX_CURRENCY_EXPOSURE - currency_exposure.get(base, 0))
-            if currency_exposure.get(quote, 0) + weight > MAX_CURRENCY_EXPOSURE:
-                weight = max(0, MAX_CURRENCY_EXPOSURE - currency_exposure.get(quote, 0))
+        t1 = df[(df['GBM_Sharpe'] > 0.5) & (df['Alpha_Added'] > 0) & (df['GBM_MDD'] > -0.2)]
+        t2 = df[(df['GBM_Sharpe'] > 0) & (df['GBM_MDD'] > -0.3)]
+        t3 = df.sort_values('GBM_Sharpe', ascending=False).head(MIN_ASSETS)
 
-            weights[pair] = weight
-            currency_exposure[base] = currency_exposure.get(base, 0) + weight
-            currency_exposure[quote] = currency_exposure.get(quote, 0) + weight
+        if self.regime == "BULL" and len(t1) >= MIN_ASSETS:
+            selected = t1
+        elif self.regime in ["BULL", "BEAR"] and len(t2) >= MIN_ASSETS:
+            selected = t2
+        else:
+            selected = t3
 
-        # If not enough pairs, scale down overall risk proportionally
-        total_pairs = len(weights)
-        allocation_factor = 1.0
-        if total_pairs < MIN_PAIRS:
-            allocation_factor = total_pairs / MIN_PAIRS
-            print(f"⚠️ Diversification shortfall ({total_pairs}/{MIN_PAIRS}). Scaling risk to {allocation_factor:.1%}")
-            for k in weights:
-                weights[k] *= allocation_factor
+        selected['Apex_Score'] = selected.apply(AdvancedMetrics.calculate_conviction, axis=1)
+        selected = selected.sort_values('Apex_Score', ascending=False).head(MAX_ASSETS)
+        self.log(f"Selected {len(selected)} assets")
+        return selected
 
-        # Build final DataFrame
-        self.weights_df = pd.DataFrame(list(weights.items()), columns=['Ticker', 'Weight'])
+    # ===== COMBINED ALLOCATION LOGIC =====
+    def allocate_weights(self, assets):
+        self.log("Running Covariance-Aware Risk Parity Optimization")
+        optimized = CitadelGradeOptimizer.optimize_risk_parity(assets)
 
-        # Add cash buffer
-        total_allocated = self.weights_df['Weight'].sum()
-        cash_row = pd.DataFrame([{'Ticker': CASH_TICKER, 'Weight': 1.0 - total_allocated}])
-        self.weights_df = pd.concat([self.weights_df, cash_row], ignore_index=True)
-        self.weights_df.to_csv(f"{OUTPUT_DIR}/portfolio_weights.csv", index=False)
+        exposure = 0.95
+        if self.regime == "CRISIS":
+            exposure = 0.40
+            self.log("CRISIS MODE: Exposure capped at 40%")
+        elif self.regime == "BEAR":
+            exposure = 0.70
 
-    def _park_in_cash(self):
-        """100% cash scenario."""
-        pd.DataFrame([{'Ticker': CASH_TICKER, 'Weight': 1.0}]).to_csv(
-            f"{OUTPUT_DIR}/portfolio_weights.csv", index=False
-        )
+        df = assets.copy()
+        df['Final_Weight'] = optimized * exposure
 
-    def print_summary(self):
-        print("\n" + "="*40)
-        print("🌍 FX PORTFOLIO ENGINE: FINAL WEIGHTS")
-        print("="*40)
-        print(self.weights_df.to_string(index=False))
-        print("="*40)
+        total = df['Final_Weight'].sum()
+        cash = pd.DataFrame([{
+            'Ticker': 'CASH_USD',
+            'Final_Weight': 1 - total,
+            'GBM_Sharpe': 0,
+            'GBM_MDD': 0,
+            'Apex_Score': 0
+        }])
 
+        self.portfolio = pd.concat([df, cash], ignore_index=True)
+        self.log(f"Effective Bets: {round(1/np.sum(optimized**2), 2)}")
+
+    def generate_report(self):
+        path = f"{OUTPUT_DIR}/portfolio_report.txt"
+        with open(path, "w") as f:
+            f.write(f"APEX ENGINE REPORT | {datetime.now()}\n")
+            f.write("="*40 + "\n")
+            f.write(f"REGIME: {self.regime}\n")
+            f.write("-"*40 + "\n")
+            for d in self.diagnostics:
+                f.write(f"> {d}\n")
+            f.write("="*40 + "\n")
+            f.write(self.portfolio.to_string(index=False))
+
+        self.portfolio.to_csv(f"{OUTPUT_DIR}/final_allocations.csv", index=False)
+        self.log("Report generated")
+
+# ==================== MAIN ====================
 if __name__ == "__main__":
-    engine = Stage5ForexPortfolio(STAGE4_PATH)
-    engine.load_and_filter()
-    engine.calculate_fx_weights()
-    engine.print_summary()
+    print("\nINITIALIZING PORTFOLIO ENGINE...")
+    engine = ApexPortfolioEngine()
+    assets = engine.run_selection_waterfall()
+    engine.allocate_weights(assets)
+    engine.generate_report()
+
+    print("\nFINAL PORTFOLIO")
+    print(engine.portfolio[['Ticker', 'Final_Weight']].to_string(index=False))
